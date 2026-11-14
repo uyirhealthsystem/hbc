@@ -20,8 +20,20 @@ PREVIOUS=$(readlink -f "$ROOT/current" 2>/dev/null || true)
 mv "$ROOT/releases/next" "$REL"
 cd "$REL"
 
-# DATABASE_URL etc. for the migration step below.
-set -a; . "$ENV_FILE"; set +a
+# DATABASE_URL etc. for the migration step below. Parsed like systemd's EnvironmentFile, NOT sourced:
+# a Neon URL contains '&' (…?sslmode=require&channel_binding=require), which bash would run as a
+# background job, leaving DATABASE_URL unset.
+while IFS= read -r line || [ -n "$line" ]; do
+  line=${line%$'\r'}
+  case "$line" in ''|'#'*|';'*) continue ;; esac
+  key=${line%%=*}
+  val=${line#*=}
+  key=$(printf '%s' "$key" | tr -d '[:space:]')
+  [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+  # strip one pair of surrounding quotes, as systemd does
+  if [[ "$val" =~ ^\"(.*)\"$ || "$val" =~ ^\'(.*)\'$ ]]; then val=${BASH_REMATCH[1]}; fi
+  export "$key=$val"
+done < "$ENV_FILE"
 export NODE_ENV=production
 PORT=${PORT:-4000}
 
