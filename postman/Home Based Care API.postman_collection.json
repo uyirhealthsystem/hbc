@@ -2,10 +2,48 @@
   "info": {
     "_postman_id": "6f1c2b0e-4a7d-4c55-9a51-7b3f0d2e8a11",
     "name": "Home Based Care API",
-    "description": "Home Based Care (HBC) service, NURSE / PHYSIO / CARETAKER bookings.\n\nIdentity: users, login and tokens live in the separate auth service. The API gateway validates the\nBearer token and forwards X-User-Id + X-Role. HBC trusts those headers for every role check, so these\nrequests send them directly, the same way the gateway does. The first request generates fresh user ids\nfor the run (patient, provider, rival); super admins live in a separate service, so adminId can be any UUID.\nSet gatewaySecret (environment) to the server's GATEWAY_SHARED_SECRET; every request sends it as X-Gateway-Secret.\n\nRoles: SUPER_ADMIN, PATIENT and HBC (every care provider). A provider picks their care type\n(NURSE, PHYSIO or CARETAKER) when registering their profile; it is fixed after that.\nHBC stores only service-provider profiles. Patient contact details are sent with each booking.\nThere is no admin verification: providers can pick bookings as soon as they register.\nMatching: same care type, and the booking is in the provider's pincode or within SERVICE_RADIUS_KM\n(default 10 km) of the provider's latitude/longitude.\n\nFolders run top to bottom as one end-to-end flow (collection variables carry ids between steps).\nChange careType to PHYSIO or CARETAKER to register the providers and run the same flow for another care type.",
+    "description": "Home Based Care (HBC) service, NURSE / PHYSIO / CARETAKER bookings.\n\nIdentity: users, login and tokens live in the separate auth service. Every request sends\nAuthorization: Bearer <access token>; HBC takes the user id from the token `sub` and the role from its\n`role` claim (verified against the auth service JWKS when AUTH_JWKS_URL is set).\n\nAgainst a deployed server: in the environment set baseUrl and four access tokens from the auth service:\nadminToken (SUPER_ADMIN), providerToken and rivalToken (two different HBC accounts), patientToken (PATIENT).\nAgainst a local server without AUTH_JWKS_URL, leave them empty: the collection generates unsigned dev tokens\nwith fresh user ids for every run.\n\nPayment: with PAYMENT_PROVIDER=mock the booking is PAID at once. With the real payment-service the pay step\nreturns a Razorpay checkoutUrl and stops the run: pay with a test card, then run the rest of\n\"4. Booking flow\" from \"Patient - payment status\".\n\nRoles: SUPER_ADMIN, PATIENT and HBC (every care provider). A provider picks their care type\n(NURSE, PHYSIO or CARETAKER) when registering their profile; it is fixed after that.\nHBC stores only service-provider profiles. Patient contact details are sent with each booking.\nThere is no admin verification: providers can pick bookings as soon as they register.\nMatching: same care type, and the booking is in the provider's pincode or within SERVICE_RADIUS_KM\n(default 10 km) of the provider's latitude/longitude.\n\nFolders run top to bottom as one end-to-end flow (collection variables carry ids between steps).\nChange careType to PHYSIO or CARETAKER to register the providers and run the same flow for another care type.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
+    {
+      "name": "0. Health",
+      "description": "Liveness check used by the deploy health check. No auth.",
+      "item": [
+        {
+          "name": "Health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
     {
       "name": "1. Provider profiles",
       "description": "Providers (X-Role: HBC) register their profile under their gateway X-User-Id with a care type (NURSE, PHYSIO or CARETAKER), pincode, latitude and longitude. No verification step.",
@@ -14,33 +52,23 @@
           "name": "Register provider profile",
           "event": [
             {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// Users come from the external auth service; generate this run's ids as the gateway would forward them.",
-                  "pm.collectionVariables.set('runId', String(Date.now()).slice(-8));",
-                  "pm.collectionVariables.set('patientId', pm.variables.replaceIn('{{$guid}}'));",
-                  "pm.collectionVariables.set('providerId', pm.variables.replaceIn('{{$guid}}'));",
-                  "pm.collectionVariables.set('rivalId', pm.variables.replaceIn('{{$guid}}'));"
-                ]
-              }
-            },
-            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
-                  "const res = pm.response.json();",
-                  "pm.test('profile id is the X-User-Id', () => pm.expect(res.id).to.eql(pm.collectionVariables.get('providerId')));",
-                  "pm.test('care type from the profile', () => pm.expect(res.careType).to.eql(pm.variables.get('careType')));",
-                  "pm.test('location saved', () => {",
-                  "  pm.expect(res.pincode).to.eql('600017');",
-                  "  pm.expect(res.latitude).to.be.a('number');",
-                  "  pm.expect(res.longitude).to.be.a('number');",
-                  "});",
-                  "pm.test('no verification step', () => pm.expect(res.isVerified).to.be.undefined);"
+                  "// 201 on the first run; 409 when this account already registered in an earlier run (real tokens).",
+                  "pm.test('status is 201 or 409', () => pm.expect(pm.response.code).to.be.oneOf([201, 409]));",
+                  "if (pm.response.code === 201) {",
+                  "  const res = pm.response.json();",
+                  "  pm.test('profile id is the token user id (sub)', () => pm.expect(res.id).to.eql(pm.collectionVariables.get('providerId')));",
+                  "  pm.test('care type from the profile', () => pm.expect(res.careType).to.eql(pm.variables.get('careType')));",
+                  "  pm.test('location saved', () => {",
+                  "    pm.expect(res.pincode).to.eql('600017');",
+                  "    pm.expect(res.latitude).to.be.a('number');",
+                  "    pm.expect(res.longitude).to.be.a('number');",
+                  "  });",
+                  "  pm.test('no verification step', () => pm.expect(res.isVerified).to.be.undefined);",
+                  "}"
                 ]
               }
             }
@@ -52,24 +80,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -94,7 +104,17 @@
                 "profile"
               ]
             },
-            "description": "The pre-request script starts a run: fresh gateway user ids for the patient, provider and rival."
+            "description": "The pre-request script starts a run: fresh gateway user ids for the patient, provider and rival.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -106,7 +126,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));"
+                  "pm.test('status is 201 or 409', () => pm.expect(pm.response.code).to.be.oneOf([201, 409]));"
                 ]
               }
             }
@@ -118,24 +138,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{rivalId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -160,7 +162,17 @@
                 "profile"
               ]
             },
-            "description": "Second provider of the same care type, used to prove only one provider wins the accept race."
+            "description": "Second provider of the same care type, used to prove only one provider wins the accept race.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{rivalToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -185,24 +197,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -226,6 +220,16 @@
                 "provider",
                 "profile"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -245,26 +249,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
               "host": [
@@ -276,6 +261,16 @@
                 "hbc",
                 "provider",
                 "profile"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -302,24 +297,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -342,6 +319,16 @@
                 "hbc",
                 "provider",
                 "profile"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -367,24 +354,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -409,7 +378,17 @@
                 "profile"
               ]
             },
-            "description": "The care type is fixed at registration."
+            "description": "The care type is fixed at registration.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -433,24 +412,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{$guid}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -475,7 +436,17 @@
                 "profile"
               ]
             },
-            "description": "pincode, latitude and longitude are required."
+            "description": "pincode, latitude and longitude are required.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -499,24 +470,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -541,7 +494,17 @@
                 "profile"
               ]
             },
-            "description": "Coordinates move together."
+            "description": "Coordinates move together.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -560,26 +523,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/pool",
               "host": [
@@ -594,7 +538,17 @@
                 "pool"
               ]
             },
-            "description": "No admin verification: a registered provider can see the pool immediately."
+            "description": "No admin verification: a registered provider can see the pool immediately.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         }
@@ -627,24 +581,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{adminId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "SUPER_ADMIN",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -669,6 +605,16 @@
                 "catalog",
                 "services"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -688,26 +634,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{adminId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "SUPER_ADMIN",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/admin/catalog/services?careType={{careType}}",
               "host": [
@@ -725,6 +652,16 @@
                 {
                   "key": "careType",
                   "value": "{{careType}}"
+                }
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
                 }
               ]
             }
@@ -751,24 +688,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{adminId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "SUPER_ADMIN",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -794,6 +713,16 @@
                 "services",
                 "{{serviceId}}"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -815,26 +744,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{adminId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "SUPER_ADMIN",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/admin/providers?careType={{careType}}&pincode=600017",
               "host": [
@@ -855,6 +765,16 @@
                 {
                   "key": "pincode",
                   "value": "600017"
+                }
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
                 }
               ]
             }
@@ -903,6 +823,9 @@
                   "value": "{{careType}}"
                 }
               ]
+            },
+            "auth": {
+              "type": "noauth"
             }
           },
           "response": []
@@ -945,24 +868,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -986,6 +891,16 @@
                 "patient",
                 "bookings"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -1005,26 +920,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings",
               "host": [
@@ -1042,6 +938,16 @@
                   "key": "status",
                   "value": "PENDING",
                   "disabled": true
+                }
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
                 }
               ]
             }
@@ -1071,26 +977,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/pool",
               "host": [
@@ -1103,6 +990,16 @@
                 "provider",
                 "bookings",
                 "pool"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -1126,26 +1023,7 @@
           ],
           "request": {
             "method": "POST",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{bookingId}}/accept",
               "host": [
@@ -1159,6 +1037,16 @@
                 "bookings",
                 "{{bookingId}}",
                 "accept"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -1180,26 +1068,7 @@
           ],
           "request": {
             "method": "POST",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{rivalId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{bookingId}}/accept",
               "host": [
@@ -1213,6 +1082,16 @@
                 "bookings",
                 "{{bookingId}}",
                 "accept"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{rivalToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -1239,24 +1118,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -1282,6 +1143,16 @@
                 "{{bookingId}}",
                 "confirm"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -1296,13 +1167,21 @@
                 "exec": [
                   "pm.test('status is 200', () => pm.response.to.have.status(200));",
                   "const res = pm.response.json();",
-                  "pm.test('payment-service payment created', () => pm.expect(res.payment.id).to.match(/^[0-9a-f-]{36}$/));",
+                  "pm.test('payment-service payment created', () => pm.expect(res.payment.id).to.be.a('string').and.not.empty);",
                   "pm.test('amount comes from the booking', () => pm.expect(res.payment.amount).to.eql(res.booking.amount));",
-                  "// Needs payment-service running with the `local` profile (mock provider, auto-pay): the payment is PAID at once.",
-                  "// With a real provider the response is PENDING + checkoutUrl and the booking turns PAID on payment-service's callback.",
-                  "pm.test('status PAID (payment-service local/mock)', () => pm.expect(res.booking.status).to.eql('PAID'));",
-                  "pm.test('visit OTP issued to patient', () => pm.expect(res.booking.visitOtp).to.match(/^[0-9]{6}$/));",
-                  "pm.collectionVariables.set('visitOtp', res.booking.visitOtp);"
+                  "if (res.payment.status === 'PAID') {",
+                  "  // PAYMENT_PROVIDER=mock on the server: paid at once.",
+                  "  pm.test('booking PAID', () => pm.expect(res.booking.status).to.eql('PAID'));",
+                  "} else {",
+                  "  // Real payment-service + Razorpay: pay on the checkout page, then run the rest of this folder.",
+                  "  pm.test('payment PENDING with a checkout link', () => {",
+                  "    pm.expect(res.payment.status).to.eql('PENDING');",
+                  "    pm.expect(res.payment.checkoutUrl).to.match(/^https?:\\/\\//);",
+                  "  });",
+                  "  pm.collectionVariables.set('checkoutUrl', res.payment.checkoutUrl);",
+                  "  console.log('Open and pay (Razorpay test card), then run from \"Patient - payment status\":', res.payment.checkoutUrl);",
+                  "  pm.execution.setNextRequest(null); // stop the run: the rest needs the payment",
+                  "}"
                 ]
               }
             }
@@ -1314,24 +1193,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -1357,7 +1218,65 @@
                 "{{bookingId}}",
                 "pay"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
+              ]
             }
+          },
+          "response": []
+        },
+        {
+          "name": "Patient - payment status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const res = pm.response.json();",
+                  "pm.test('booking PAID (payment-service callback arrived)', () => pm.expect(res.status).to.eql('PAID'));",
+                  "pm.test('visit OTP issued to patient', () => pm.expect(res.visitOtp).to.match(/^[0-9]{6}$/));",
+                  "pm.collectionVariables.set('visitOtp', res.visitOtp);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings/{{bookingId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings",
+                "{{bookingId}}"
+              ]
+            },
+            "description": "After paying on the checkout page: the booking turns PAID when payment-service calls POST /payments/webhook. Run the rest of this folder from here."
           },
           "response": []
         },
@@ -1377,26 +1296,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{bookingId}}",
               "host": [
@@ -1409,6 +1309,16 @@
                 "provider",
                 "bookings",
                 "{{bookingId}}"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -1435,24 +1345,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -1477,6 +1369,16 @@
                 "bookings",
                 "{{bookingId}}",
                 "start"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -1503,24 +1405,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -1546,6 +1430,16 @@
                 "{{bookingId}}",
                 "complete"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -1567,26 +1461,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings/{{bookingId}}",
               "host": [
@@ -1599,6 +1474,16 @@
                 "patient",
                 "bookings",
                 "{{bookingId}}"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -1619,26 +1504,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings?status=COMPLETED",
               "host": [
@@ -1655,6 +1521,16 @@
                 {
                   "key": "status",
                   "value": "COMPLETED"
+                }
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
                 }
               ]
             }
@@ -1697,24 +1573,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -1737,6 +1595,16 @@
                 "hbc",
                 "patient",
                 "bookings"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -1763,24 +1631,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -1803,6 +1653,16 @@
                 "hbc",
                 "patient",
                 "bookings"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -1829,26 +1689,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/pool",
               "host": [
@@ -1861,6 +1702,16 @@
                 "provider",
                 "bookings",
                 "pool"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -1881,26 +1732,7 @@
           ],
           "request": {
             "method": "POST",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{farId}}/accept",
               "host": [
@@ -1916,7 +1748,17 @@
                 "accept"
               ]
             },
-            "description": "Accept uses the same matching rule as the pool."
+            "description": "Accept uses the same matching rule as the pool.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -1940,24 +1782,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -1983,6 +1807,16 @@
                 "{{nearbyId}}",
                 "cancel"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -2007,24 +1841,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -2049,6 +1865,16 @@
                 "bookings",
                 "{{farId}}",
                 "cancel"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -2089,24 +1915,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -2130,6 +1938,16 @@
                 "patient",
                 "bookings"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -2149,26 +1967,7 @@
           ],
           "request": {
             "method": "POST",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{booking2Id}}/accept",
               "host": [
@@ -2182,6 +1981,16 @@
                 "bookings",
                 "{{booking2Id}}",
                 "accept"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -2208,24 +2017,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -2250,6 +2041,16 @@
                 "bookings",
                 "{{booking2Id}}",
                 "release"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -2276,24 +2077,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -2319,6 +2102,16 @@
                 "{{booking2Id}}",
                 "cancel"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -2338,26 +2131,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{adminId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "SUPER_ADMIN",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/admin/bookings?careType={{careType}}",
               "host": [
@@ -2381,6 +2155,16 @@
                   "disabled": true
                 }
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -2400,26 +2184,7 @@
           ],
           "request": {
             "method": "DELETE",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{adminId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "SUPER_ADMIN",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/admin/catalog/services/{{serviceId}}",
               "host": [
@@ -2434,6 +2199,16 @@
                 "services",
                 "{{serviceId}}"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -2441,11 +2216,11 @@
       ]
     },
     {
-      "name": "7. Gateway header checks",
-      "description": "Negative cases for the X-User-Id / X-Role trust boundary.",
+      "name": "7. Auth checks",
+      "description": "Every caller is identified by its Authorization: Bearer token (sub = user id, role claim).",
       "item": [
         {
-          "name": "No identity headers (401)",
+          "name": "No token (401)",
           "event": [
             {
               "listen": "test",
@@ -2472,19 +2247,66 @@
                 "admin",
                 "bookings"
               ]
+            },
+            "auth": {
+              "type": "noauth"
             }
           },
           "response": []
         },
         {
-          "name": "X-User-Id not a UUID (401)",
+          "name": "Malformed token (401)",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('status is 401', () => pm.response.to.have.status(401));"
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
+                  "pm.test('INVALID_TOKEN', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_TOKEN'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "bookings"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "not-a-jwt",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Token and X-User-Id disagree (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
+                  "pm.test('IDENTITY_MISMATCH', () => pm.expect(pm.response.json().error.code).to.eql('IDENTITY_MISMATCH'));"
                 ]
               }
             }
@@ -2494,21 +2316,14 @@
             "header": [
               {
                 "key": "X-User-Id",
-                "value": "not-a-uuid",
+                "value": "{{patientId}}",
                 "type": "text",
-                "description": "Set by the gateway after validating the access token"
+                "description": "Someone else than the token"
               },
               {
-                "key": "X-Role",
+                "key": "X-User-Role",
                 "value": "SUPER_ADMIN",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+                "type": "text"
               }
             ],
             "url": {
@@ -2523,56 +2338,15 @@
                 "admin",
                 "bookings"
               ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Unknown X-Role (401)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 401', () => pm.response.to.have.status(401));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{adminId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "ROOT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/hbc/admin/bookings",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "hbc",
-                "admin",
-                "bookings"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -2598,24 +2372,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -2640,6 +2396,16 @@
                 "catalog",
                 "services"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
@@ -2659,26 +2425,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "HBC",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings",
               "host": [
@@ -2690,6 +2437,16 @@
                 "hbc",
                 "patient",
                 "bookings"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{providerToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -2710,26 +2467,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/pool",
               "host": [
@@ -2743,12 +2481,22 @@
                 "bookings",
                 "pool"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
+              ]
             }
           },
           "response": []
         },
         {
-          "name": "Care type sent as X-Role (401)",
+          "name": "Expired token (401)",
           "event": [
             {
               "listen": "test",
@@ -2762,26 +2510,7 @@
           ],
           "request": {
             "method": "GET",
-            "header": [
-              {
-                "key": "X-User-Id",
-                "value": "{{providerId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "NURSE",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
-              }
-            ],
+            "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
               "host": [
@@ -2795,7 +2524,17 @@
                 "profile"
               ]
             },
-            "description": "Providers must come through as X-Role HBC; NURSE / PHYSIO / CARETAKER are not roles."
+            "description": "Providers must come through as X-Role HBC; NURSE / PHYSIO / CARETAKER are not roles.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{expiredToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -2819,24 +2558,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -2859,6 +2580,16 @@
                 "hbc",
                 "provider",
                 "profile"
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
               ]
             }
           },
@@ -2884,24 +2615,6 @@
                 "key": "Content-Type",
                 "value": "application/json",
                 "type": "text"
-              },
-              {
-                "key": "X-User-Id",
-                "value": "{{patientId}}",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Role",
-                "value": "PATIENT",
-                "type": "text",
-                "description": "Set by the gateway after validating the access token"
-              },
-              {
-                "key": "X-Gateway-Secret",
-                "value": "{{gatewaySecret}}",
-                "type": "text",
-                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
               }
             ],
             "body": {
@@ -2925,6 +2638,243 @@
                 "patient",
                 "bookings"
               ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{patientToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "8. Payment webhook",
+      "description": "POST /api/v1/hbc/payments/webhook is called by payment-service (PAID / FAILED), not by apps. It has no bearer\ntoken: it is authenticated by X-Payment-Timestamp + X-Payment-Signature =\nhex(HMAC-SHA256(PAYMENT_WEBHOOK_SECRET, timestamp + \".\" + rawBody)).\n\nThese requests only use a booking id that does not exist, so they never change any data.\nSet webhookSecret in the environment (= the server PAYMENT_WEBHOOK_SECRET) to also check that the secret matches.",
+      "item": [
+        {
+          "name": "Unsigned callback (401)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('webhookEventId', 'postman-' + Date.now());",
+                  "pm.collectionVariables.set('webhookPaymentId', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.collectionVariables.set('webhookBookingId', pm.variables.replaceIn('{{$guid}}')); // a booking that does not exist",
+                  "pm.collectionVariables.set('webhookOccurredAt', new Date().toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
+                  "pm.test('INVALID_SIGNATURE', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_SIGNATURE'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{webhookEventId}}\",\n  \"paymentId\": \"{{webhookPaymentId}}\",\n  \"referenceType\": \"HOME_CARE_BOOKING\",\n  \"referenceId\": \"{{webhookBookingId}}\",\n  \"payerId\": \"{{patientId}}\",\n  \"status\": \"PAID\",\n  \"amount\": 1,\n  \"currency\": \"INR\",\n  \"occurredAt\": \"{{webhookOccurredAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/payments/webhook",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "payments",
+                "webhook"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Wrong signature (401)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('webhookEventId', 'postman-' + Date.now());",
+                  "pm.collectionVariables.set('webhookPaymentId', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.collectionVariables.set('webhookBookingId', pm.variables.replaceIn('{{$guid}}')); // a booking that does not exist",
+                  "pm.collectionVariables.set('webhookOccurredAt', new Date().toISOString());",
+                  "pm.collectionVariables.set('webhookTimestamp', String(Math.floor(Date.now() / 1000)));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
+                  "pm.test('INVALID_SIGNATURE', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_SIGNATURE'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Payment-Timestamp",
+                "value": "{{webhookTimestamp}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Payment-Signature",
+                "value": "0000000000000000000000000000000000000000000000000000000000000000",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{webhookEventId}}\",\n  \"paymentId\": \"{{webhookPaymentId}}\",\n  \"referenceType\": \"HOME_CARE_BOOKING\",\n  \"referenceId\": \"{{webhookBookingId}}\",\n  \"payerId\": \"{{patientId}}\",\n  \"status\": \"PAID\",\n  \"amount\": 1,\n  \"currency\": \"INR\",\n  \"occurredAt\": \"{{webhookOccurredAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/payments/webhook",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "payments",
+                "webhook"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Signed callback, unknown booking (404)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('webhookEventId', 'postman-' + Date.now());",
+                  "pm.collectionVariables.set('webhookPaymentId', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.collectionVariables.set('webhookBookingId', pm.variables.replaceIn('{{$guid}}')); // a booking that does not exist",
+                  "pm.collectionVariables.set('webhookOccurredAt', new Date().toISOString());",
+                  "// Signs the exact bytes that are sent, the way payment-service does.",
+                  "const secret = pm.environment.get('webhookSecret');",
+                  "const ts = String(Math.floor(Date.now() / 1000));",
+                  "const body = pm.variables.replaceIn(pm.request.body.raw);",
+                  "pm.request.body.raw = body;",
+                  "pm.collectionVariables.set('webhookTimestamp', ts);",
+                  "pm.collectionVariables.set('webhookSignature', secret ? CryptoJS.HmacSHA256(ts + '.' + body, secret).toString(CryptoJS.enc.Hex) : '');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.environment.get('webhookSecret')) {",
+                  "  pm.test('skipped: set webhookSecret in the environment to check the secret', () => {});",
+                  "} else {",
+                  "  pm.test('signature accepted (secret matches the server)', () => pm.expect(pm.response.code).to.not.eql(401));",
+                  "  pm.test('status is 404 (booking does not exist)', () => pm.response.to.have.status(404));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Payment-Timestamp",
+                "value": "{{webhookTimestamp}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Payment-Signature",
+                "value": "{{webhookSignature}}",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{webhookEventId}}\",\n  \"paymentId\": \"{{webhookPaymentId}}\",\n  \"referenceType\": \"HOME_CARE_BOOKING\",\n  \"referenceId\": \"{{webhookBookingId}}\",\n  \"payerId\": \"{{patientId}}\",\n  \"status\": \"PAID\",\n  \"amount\": 1,\n  \"currency\": \"INR\",\n  \"occurredAt\": \"{{webhookOccurredAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/payments/webhook",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "payments",
+                "webhook"
+              ]
             }
           },
           "response": []
@@ -2947,14 +2897,9 @@
     },
     {
       "key": "adminId",
-      "value": "00000000-0000-4000-8000-000000000001",
-      "type": "string",
-      "description": "Super admin id from the separate super-admin service"
-    },
-    {
-      "key": "gatewaySecret",
       "value": "",
-      "type": "string"
+      "type": "string",
+      "description": "From adminToken (sub)"
     },
     {
       "key": "runId",
@@ -3005,6 +2950,96 @@
       "key": "farId",
       "value": "",
       "type": "string"
+    },
+    {
+      "key": "adminToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "providerToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "rivalToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "patientToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "expiredToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "checkoutUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "webhookEventId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "webhookPaymentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "webhookBookingId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "webhookOccurredAt",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "webhookTimestamp",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "webhookSignature",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Tokens: set adminToken / providerToken / rivalToken / patientToken in the ENVIRONMENT (access tokens",
+          "// from authservice: SUPER_ADMIN, two HBC providers, PATIENT). Environment values win over the collection ones.",
+          "// Without them (local server, no AUTH_JWKS_URL) unsigned dev tokens with fresh ids are generated per run;",
+          "// a server with AUTH_JWKS_URL (production) rejects those.",
+          "const b64 = (o) => btoa(JSON.stringify(o)).replace(/=+$/, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
+          "const devToken = (role, exp) => b64({ alg: 'none', typ: 'JWT' }) + '.' +",
+          "  b64({ sub: pm.variables.replaceIn('{{$guid}}'), role, exp: exp || Math.floor(Date.now() / 1000) + 3600 }) + '.dev';",
+          "if (pm.info.requestName === 'Register provider profile' || !pm.collectionVariables.get('patientToken')) {",
+          "  pm.collectionVariables.set('runId', String(Date.now()).slice(-8));",
+          "  pm.collectionVariables.set('adminToken', devToken('SUPER_ADMIN'));",
+          "  pm.collectionVariables.set('providerToken', devToken('HBC'));",
+          "  pm.collectionVariables.set('rivalToken', devToken('HBC'));",
+          "  pm.collectionVariables.set('patientToken', devToken('PATIENT'));",
+          "  pm.collectionVariables.set('expiredToken', devToken('PATIENT', Math.floor(Date.now() / 1000) - 60));",
+          "}",
+          "// The user ids the tests compare against are the tokens' `sub`.",
+          "const sub = (t) => { try { return JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub; } catch (e) { return ''; } };",
+          "for (const [idVar, tokenVar] of [['adminId', 'adminToken'], ['providerId', 'providerToken'], ['rivalId', 'rivalToken'], ['patientId', 'patientToken']]) {",
+          "  pm.collectionVariables.set(idVar, sub(pm.variables.get(tokenVar) || ''));",
+          "}"
+        ]
+      }
     }
   ]
 }
