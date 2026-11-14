@@ -1,0 +1,744 @@
+openapi: 3.0.3
+info:
+  title: Home Based Care API
+  version: 1.0.0
+  description: |
+    Home-based care platform for three care types: **NURSE**, **PHYSIO** and **CARETAKER**.
+
+    Booking lifecycle (identical for every care type):
+
+    | Step | Actor | Endpoint | Status after |
+    |------|-------|----------|--------------|
+    | 1. Book care (+ prescriptions) | Patient | `POST /patient/bookings` | `PENDING` (visible in pool) |
+    | 2. Pick booking from pool | Provider | `POST /provider/bookings/{id}/accept` | `ACCEPTED` (patient contact revealed) |
+    | 3. Call patient & confirm | Provider | `POST /provider/bookings/{id}/confirm` | `CONFIRMED` |
+    | 3b. Could not confirm → back to pool | Provider | `POST /provider/bookings/{id}/release` | `PENDING` |
+    | 4. Pay | Patient | `POST /patient/bookings/{id}/pay` | `PAID` (visit OTP issued to patient) |
+    | 5. Enter OTP at patient home | Provider | `POST /provider/bookings/{id}/start` | `IN_PROGRESS` |
+    | 6. Complete service | Provider | `POST /provider/bookings/{id}/complete` | `COMPLETED` |
+
+    Patients may cancel while `PENDING`, `ACCEPTED` or `CONFIRMED`.
+
+    **Identity.** Login, credentials and tokens belong to the separate auth service. Call this service
+    directly with `Authorization: Bearer <access token>`: the user id is the token's `sub`, the role its
+    `role` claim, verified against the auth service JWKS (`AUTH_JWKS_URL`). The same token is forwarded to
+    payment-service by `POST /patient/bookings/{id}/pay`, so paying always needs it.
+    For local testing, `X-User-Id` + `X-User-Role` (or the older `X-Role`) are also accepted without a token
+    (`TRUST_IDENTITY_HEADERS`, never in production). Once the API gateway is in front, set
+    `GATEWAY_SHARED_SECRET`: requests carrying a matching `X-Gateway-Secret` are identified by the
+    gateway's `X-User-Id` / `X-User-Role`. Super admins reach `/admin/*` with role `SUPER_ADMIN`.
+
+    **Roles.** `SUPER_ADMIN` (separate super-admin service), `PATIENT`, and `HBC` for every care provider.
+    A provider's care type (`NURSE`, `PHYSIO` or `CARETAKER`) is not a role: it is chosen when the provider
+    registers their profile, is fixed after that, and decides which bookings appear in their pool.
+
+    **Matching.** There is no admin verification: a provider can pick bookings as soon as their profile is
+    registered. A booking is matched to a provider when the care type is the same **and** the booking is in
+    the provider's `pincode` **or** within `SERVICE_RADIUS_KM` (default 10 km) of the provider's
+    `latitude`/`longitude`. The same rule applies to the pool and to accept.
+
+    **Data owned here.** Service-provider profiles (registered under the caller's `X-User-Id`), the catalog, bookings, prescriptions and payments. There is no patient profile: the patient's
+    contact details are captured on each booking.
+
+    All endpoints except the public catalog require the identity headers.
+servers:
+  - url: http://localhost:4000/api/v1/hbc
+security:
+  - bearerAuth: []
+  - gatewayUserId: []
+    gatewayRole: []
+tags:
+  - name: Provider Profile
+  - name: Catalog
+  - name: Admin
+  - name: Patient Bookings
+  - name: Provider Bookings
+  - name: Payments
+
+paths:
+  /provider/profile:
+    post:
+      tags: [Provider Profile]
+      summary: Register the caller's provider profile (X-Role HBC) with its care type and location. No verification needed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProviderProfileInput' }
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Provider' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    get:
+      tags: [Provider Profile]
+      summary: The caller's provider profile
+      responses:
+        '200':
+          description: Profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Provider' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Provider Profile]
+      summary: Update the caller's provider profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProviderProfilePatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Provider' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /catalog/services:
+    get:
+      tags: [Catalog]
+      summary: List active care services (public)
+      security: []
+      parameters:
+        - { $ref: '#/components/parameters/CareTypeQuery' }
+      responses:
+        '200':
+          description: Services
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CareService' }
+
+  /admin/catalog/services:
+    get:
+      tags: [Admin]
+      summary: List all care services (incl. inactive)
+      parameters:
+        - { $ref: '#/components/parameters/CareTypeQuery' }
+      responses:
+        '200':
+          description: Services
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CareService' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Admin]
+      summary: Create a catalog service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CareServiceInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CareService' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /admin/catalog/services/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    patch:
+      tags: [Admin]
+      summary: Update a catalog service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CareServicePatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CareService' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Admin]
+      summary: Deactivate a catalog service (soft delete)
+      responses:
+        '204': { description: Deactivated }
+        '404': { $ref: '#/components/responses/Error' }
+  /admin/providers:
+    get:
+      tags: [Admin]
+      summary: List providers
+      parameters:
+        - { $ref: '#/components/parameters/CareTypeQuery' }
+        - name: pincode
+          in: query
+          schema: { type: string, example: '600017' }
+      responses:
+        '200':
+          description: Providers
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Provider' }
+  /admin/bookings:
+    get:
+      tags: [Admin]
+      summary: List all bookings
+      parameters:
+        - { $ref: '#/components/parameters/StatusQuery' }
+        - { $ref: '#/components/parameters/CareTypeQuery' }
+      responses:
+        '200':
+          description: Bookings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Booking' }
+
+  /patient/bookings:
+    post:
+      tags: [Patient Bookings]
+      summary: Book a care service (goes to the provider pool)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateBookingRequest' }
+      responses:
+        '201':
+          description: Booking created with status PENDING
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    get:
+      tags: [Patient Bookings]
+      summary: List my bookings
+      parameters:
+        - { $ref: '#/components/parameters/StatusQuery' }
+      responses:
+        '200':
+          description: Bookings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Booking' }
+  /patient/bookings/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    get:
+      tags: [Patient Bookings]
+      summary: Get my booking (includes visit OTP once PAID, and assigned provider details)
+      responses:
+        '200':
+          description: Booking
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '404': { $ref: '#/components/responses/Error' }
+  /patient/bookings/{id}/pay:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Patient Bookings]
+      summary: Start the online payment for a CONFIRMED booking (payment-service / Razorpay)
+      description: |
+        Creates the payment in the Uyir payment-service (referenceType `HOME_CARE_BOOKING`,
+        Idempotency-Key `hbc-booking-<id>`, amount taken from the booking) and returns its hosted
+        `checkoutUrl`. Open it in the app. The booking stays CONFIRMED until payment-service reports the
+        payment PAID (signed callback to `/payments/webhook`); then it turns PAID and the visit OTP is issued.
+        After checkout the app calls payment-service `POST /api/payments/{payment.id}/refresh` and polls
+        `GET /patient/bookings/{id}`.
+
+        Safe to call again: same checkout while it is valid, a new one after it expired or failed.
+        The patient's `Authorization: Bearer` token must reach HBC (the gateway forwards it): payment-service
+        creates the payment as the patient.
+      responses:
+        '200':
+          description: Payment created (PENDING with a checkoutUrl), or already PAID
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  booking: { $ref: '#/components/schemas/Booking' }
+                  payment: { $ref: '#/components/schemas/PaymentIntent' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '502':
+          description: payment-service rejected the request (PAYMENT_REJECTED, PAYMENT_AUTH_FAILED, PAYMENT_MISMATCH)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: payment-service unreachable or not configured (PAYMENT_UNAVAILABLE); retry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /payments/webhook:
+    post:
+      tags: [Payments]
+      summary: Payment result callback from payment-service (not for apps)
+      description: |
+        Called by payment-service directly (not through the gateway). No user headers: authenticated by
+        `X-Payment-Signature = hex(HMAC-SHA256(PAYMENT_WEBHOOK_SECRET, X-Payment-Timestamp + "." + rawBody))`,
+        timestamp within 5 minutes. Idempotent on `eventId`. PAID with amount >= booking amount moves a
+        CONFIRMED booking to PAID and issues the visit OTP; a late FAILED never undoes PAID; PAID on a
+        cancelled booking is recorded and flagged `refundRequired`.
+      security: []
+      parameters:
+        - { name: X-Payment-Timestamp, in: header, required: true, schema: { type: string } }
+        - { name: X-Payment-Signature, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paymentId, referenceType, referenceId, status, amount, currency, occurredAt]
+              properties:
+                eventId: { type: string }
+                paymentId: { type: string, format: uuid }
+                referenceType: { type: string, example: HOME_CARE_BOOKING }
+                referenceId: { type: string, format: uuid, description: The booking id }
+                payerId: { type: string }
+                status: { type: string, enum: [PAID, FAILED] }
+                amount: { type: number, example: 750.0 }
+                currency: { type: string, example: INR }
+                refundedAmount: { type: number }
+                failureReason: { type: string, nullable: true }
+                occurredAt: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Processed (or a duplicate / ignored event)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  received: { type: boolean }
+                  outcome:
+                    type: string
+                    enum: [PAID, ALREADY_PAID, DUPLICATE, AMOUNT_MISMATCH, REFUND_REQUIRED, FAILED_RECORDED, FAILED_IGNORED]
+        '400': { description: Malformed body or another module's referenceType }
+        '401': { description: Bad or stale signature }
+        '404': { description: Unknown booking (payment-service retries) }
+        '503': { description: PAYMENT_WEBHOOK_SECRET not configured }
+  /patient/bookings/{id}/cancel:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Patient Bookings]
+      summary: Cancel a booking (PENDING, ACCEPTED or CONFIRMED only)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200':
+          description: Cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /provider/bookings/pool:
+    get:
+      tags: [Provider Bookings]
+      summary: Open bookings matched to me by care type and location, nearest first (no patient contact details)
+      description: |
+        Matched = same care type, and in my pincode or within SERVICE_RADIUS_KM of my coordinates.
+        Each item carries `distanceKm` but not the booking's exact coordinates or address.
+        403 `PROVIDER_PROFILE_REQUIRED` without a profile; 403 `PROVIDER_LOCATION_REQUIRED` for a profile
+        registered before location matching that has no pincode/coordinates yet.
+      responses:
+        '200':
+          description: Pool
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Booking' }
+        '403': { $ref: '#/components/responses/Error' }
+  /provider/bookings:
+    get:
+      tags: [Provider Bookings]
+      summary: Bookings assigned to me
+      parameters:
+        - { $ref: '#/components/parameters/StatusQuery' }
+      responses:
+        '200':
+          description: Bookings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Booking' }
+  /provider/bookings/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    get:
+      tags: [Provider Bookings]
+      summary: Get a booking assigned to me (patient contact + prescriptions revealed)
+      responses:
+        '200':
+          description: Booking
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '404': { $ref: '#/components/responses/Error' }
+  /provider/bookings/{id}/accept:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Provider Bookings]
+      summary: Pick a booking from the pool. Reveals patient contact.
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /provider/bookings/{id}/release:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Provider Bookings]
+      summary: Return an ACCEPTED booking to the pool (e.g. patient unreachable)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200':
+          description: Released
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '409': { $ref: '#/components/responses/Error' }
+  /provider/bookings/{id}/confirm:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Provider Bookings]
+      summary: Confirm the booking after calling the patient
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string }
+      responses:
+        '200':
+          description: Confirmed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '409': { $ref: '#/components/responses/Error' }
+  /provider/bookings/{id}/start:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Provider Bookings]
+      summary: Enter the patient's visit OTP at their home to start the service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [otp]
+              properties:
+                otp: { type: string, pattern: '^[0-9]{6}$', example: '482913' }
+      responses:
+        '200':
+          description: Started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /provider/bookings/{id}/complete:
+    parameters:
+      - { $ref: '#/components/parameters/IdPath' }
+    post:
+      tags: [Provider Bookings]
+      summary: Mark the service as completed
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string }
+      responses:
+        '200':
+          description: Completed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '409': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Auth service access token (`sub` = user id, `role` = PATIENT, HBC or SUPER_ADMIN). Required to pay.
+    gatewayUserId:
+      type: apiKey
+      in: header
+      name: X-User-Id
+      description: Caller's user id (UUID), set by the gateway after validating the access token.
+    gatewayRole:
+      type: apiKey
+      in: header
+      name: X-User-Role
+      description: Caller's role (SUPER_ADMIN, PATIENT or HBC), set by the gateway (`X-Role` also accepted). All care providers are HBC.
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CareTypeQuery:
+      name: careType
+      in: query
+      schema: { $ref: '#/components/schemas/CareType' }
+    StatusQuery:
+      name: status
+      in: query
+      schema: { $ref: '#/components/schemas/BookingStatus' }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    CareType:
+      type: string
+      enum: [NURSE, PHYSIO, CARETAKER]
+    BookingStatus:
+      type: string
+      enum: [PENDING, ACCEPTED, CONFIRMED, PAID, IN_PROGRESS, COMPLETED, CANCELLED]
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: INVALID_STATE }
+            message: { type: string }
+            details: {}
+    ProviderProfileInput:
+      type: object
+      required: [careType, fullName, phone, pincode, latitude, longitude]
+      properties:
+        careType:
+          allOf:
+            - $ref: '#/components/schemas/CareType'
+          description: The provider's profile type. Fixed after registration.
+        fullName: { type: string, example: Anitha Kumar }
+        phone: { type: string, example: '+919876543210' }
+        pincode: { $ref: '#/components/schemas/Pincode' }
+        latitude: { $ref: '#/components/schemas/Latitude' }
+        longitude: { $ref: '#/components/schemas/Longitude' }
+        licenseNo: { type: string }
+        experienceYears: { type: integer, minimum: 0 }
+        city: { type: string }
+    ProviderProfilePatch:
+      type: object
+      description: careType cannot be changed; sending it returns 400. latitude and longitude must be sent together.
+      additionalProperties: false
+      properties:
+        fullName: { type: string }
+        phone: { type: string }
+        pincode: { $ref: '#/components/schemas/Pincode' }
+        latitude: { $ref: '#/components/schemas/Latitude' }
+        longitude: { $ref: '#/components/schemas/Longitude' }
+        licenseNo: { type: string }
+        experienceYears: { type: integer, minimum: 0 }
+        city: { type: string }
+    Provider:
+      type: object
+      properties:
+        id: { type: string, format: uuid, description: The provider's X-User-Id }
+        fullName: { type: string }
+        phone: { type: string }
+        careType: { $ref: '#/components/schemas/CareType' }
+        licenseNo: { type: string, nullable: true }
+        experienceYears: { type: integer, nullable: true }
+        city: { type: string, nullable: true }
+        pincode: { type: string, nullable: true, description: Null only for profiles registered before location matching }
+        latitude: { type: number, nullable: true }
+        longitude: { type: number, nullable: true }
+        createdAt: { type: string, format: date-time }
+    Pincode:
+      type: string
+      pattern: '^[0-9]{4,10}$'
+      example: '600017'
+    Latitude:
+      type: number
+      minimum: -90
+      maximum: 90
+      example: 13.0418
+    Longitude:
+      type: number
+      minimum: -180
+      maximum: 180
+      example: 80.2341
+    CareServiceInput:
+      type: object
+      required: [careType, name, price, durationMinutes]
+      properties:
+        careType: { $ref: '#/components/schemas/CareType' }
+        name: { type: string, example: Wound dressing }
+        description: { type: string }
+        price: { type: number, example: 799 }
+        durationMinutes: { type: integer, example: 60 }
+        isActive: { type: boolean, default: true }
+    CareServicePatch:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        price: { type: number }
+        durationMinutes: { type: integer }
+        isActive: { type: boolean }
+    CareService:
+      allOf:
+        - $ref: '#/components/schemas/CareServiceInput'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+    PrescriptionInput:
+      type: object
+      required: [medicineName]
+      properties:
+        medicineName: { type: string, example: Insulin glargine }
+        dosage: { type: string, example: 10 units }
+        frequency: { type: string, example: 'Once daily, at night' }
+        duration: { type: string, example: 14 days }
+        instructions: { type: string }
+        documentUrl: { type: string, format: uri, description: Link to an uploaded prescription image/PDF }
+    Prescription:
+      allOf:
+        - $ref: '#/components/schemas/PrescriptionInput'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+    CreateBookingRequest:
+      type: object
+      required: [serviceId, scheduledAt, patientName, patientPhone, address, city, pincode, latitude, longitude]
+      properties:
+        serviceId: { type: string, format: uuid }
+        scheduledAt: { type: string, format: date-time }
+        patientName: { type: string, example: Priya Raman }
+        patientPhone: { type: string, example: '+919876543210' }
+        address: { type: string, example: '12 Gandhi Street, T Nagar' }
+        city: { type: string, example: Chennai }
+        pincode: { $ref: '#/components/schemas/Pincode' }
+        latitude: { $ref: '#/components/schemas/Latitude' }
+        longitude: { $ref: '#/components/schemas/Longitude' }
+        notes: { type: string }
+        prescriptions:
+          type: array
+          items: { $ref: '#/components/schemas/PrescriptionInput' }
+    ContactInfo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        fullName: { type: string }
+        phone: { type: string }
+    Booking:
+      type: object
+      description: |
+        Fields are role-filtered. In the provider pool `patient`, `address`, `latitude`, `longitude`,
+        `notes` and `prescriptions` are omitted and `distanceKm` is added. `visitOtp` is only ever
+        returned to the patient.
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/BookingStatus' }
+        careType: { $ref: '#/components/schemas/CareType' }
+        service:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            durationMinutes: { type: integer }
+        amount: { type: number }
+        scheduledAt: { type: string, format: date-time }
+        address: { type: string }
+        city: { type: string }
+        pincode: { type: string }
+        latitude: { type: number, nullable: true, description: Null for bookings made before location matching }
+        longitude: { type: number, nullable: true }
+        distanceKm:
+          type: number
+          nullable: true
+          description: Pool only. Km from the provider; null when the booking has no coordinates (matched by pincode).
+        notes: { type: string, nullable: true }
+        patient: { $ref: '#/components/schemas/ContactInfo' }
+        provider: { $ref: '#/components/schemas/ContactInfo' }
+        prescriptions:
+          type: array
+          items: { $ref: '#/components/schemas/Prescription' }
+        visitOtp: { type: string, nullable: true }
+        acceptedAt: { type: string, format: date-time, nullable: true }
+        confirmedAt: { type: string, format: date-time, nullable: true }
+        paidAt: { type: string, format: date-time, nullable: true }
+        startedAt: { type: string, format: date-time, nullable: true }
+        completedAt: { type: string, format: date-time, nullable: true }
+        cancelledAt: { type: string, format: date-time, nullable: true }
+        cancelReason: { type: string, nullable: true }
+        payment:
+          description: Patient and admin views only. null until a payment is started.
+          type: object
+          nullable: true
+          allOf: [{ $ref: '#/components/schemas/BookingPayment' }]
+        createdAt: { type: string, format: date-time }
+    BookingPayment:
+      type: object
+      properties:
+        id: { type: string, format: uuid, description: payment-service payment id }
+        status: { type: string, enum: [PENDING, PAID, FAILED] }
+        failureReason: { type: string, nullable: true, description: Last failed attempt; the patient can pay again }
+        refundRequired: { type: boolean, description: Paid after the booking was cancelled; refund via payment-service }
+    PaymentIntent:
+      type: object
+      properties:
+        id: { type: string, format: uuid, description: payment-service payment id }
+        status: { type: string, enum: [PENDING, PAID, FAILED] }
+        checkoutUrl: { type: string, format: uri, nullable: true, description: Hosted Razorpay checkout; null once PAID }
+        checkoutExpiresAt: { type: string, format: date-time, nullable: true }
+        amount: { type: number, example: 750.0 }
+        currency: { type: string, example: INR }

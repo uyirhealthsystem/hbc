@@ -1,0 +1,158 @@
+name: CI / CD
+
+# Push to main -> typecheck, build, migrate a throwaway Postgres, end-to-end + smoke tests, then deploy to EC2.
+# Same flow as labscan / ecg. One-time server setup: deploy/setup-ec2.sh.
+# Secrets (Settings > Environments > production): EC2_HOST, EC2_USER (ec2-user), EC2_SSH_KEY (private key, PEM)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ------------------------------------------------------------------ CI ----
+  test:
+    name: Typecheck + build + migrate + e2e tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hbc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hbc_test
+      PAYMENT_WEBHOOK_SECRET: ci-webhook-secret-0123456789
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Apply migrations
+        run: node dist/db/migrate.js
+
+      # Mock payments + identity headers: the whole NURSE / PHYSIO / CARETAKER booking and payment flow.
+      - name: Start service (test mode)
+        env:
+          NODE_ENV: development
+          PORT: "4000"
+          PAYMENT_PROVIDER: mock
+          TRUST_IDENTITY_HEADERS: "true"
+        run: |
+          node dist/server.js > service.log 2>&1 &
+          curl -fsS --retry 15 --retry-delay 1 --retry-connrefused http://127.0.0.1:4000/health
+
+      - name: End-to-end tests
+        env:
+          BASE_URL: http://127.0.0.1:4000/api/v1/hbc
+        run: npm run test:e2e
+
+      # Same config checks as the server: production must start, and must refuse header-only identity.
+      - name: Production-mode smoke test
+        env:
+          NODE_ENV: production
+          PORT: "4001"
+          AUTH_JWKS_URL: https://auth.invalid/.well-known/jwks.json
+          PAYMENT_SERVICE_URL: https://payments.invalid
+        run: |
+          node dist/server.js > service-prod.log 2>&1 &
+          curl -fsS --retry 15 --retry-delay 1 --retry-connrefused http://127.0.0.1:4001/health
+          curl -fsS http://127.0.0.1:4001/api/v1/hbc/catalog/services > /dev/null
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'X-User-Id: 11111111-2222-4333-8444-555555555555' -H 'X-User-Role: PATIENT' \
+            http://127.0.0.1:4001/api/v1/hbc/patient/bookings)
+          [ "$CODE" = "401" ] || { echo "::error::expected 401 for header-only identity, got $CODE"; exit 1; }
+
+      - name: Service log
+        if: always()
+        run: cat service.log service-prod.log 2>/dev/null || true
+
+  # -------------------------------------------------------------- Deploy ----
+  deploy:
+    name: Deploy to EC2
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-hbc-production
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build release
+        run: npm run build
+
+      # node_modules is shipped pre-installed, so the EC2 host never runs tsc or `npm ci`
+      # (a full install there gets OOM-killed - exit 137 - on a small instance).
+      - name: Prune to production dependencies
+        run: npm prune --omit=dev --ignore-scripts
+
+      - name: Assemble release bundle
+        run: |
+          rm -rf release
+          mkdir -p release
+          cp -a dist node_modules package.json package-lock.json release/
+          cp -a deploy release/deploy
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Upload release to EC2
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            'rm -rf /opt/hbc/releases/next && mkdir -p /opt/hbc/releases/next'
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            release/ \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/opt/hbc/releases/next/"
+
+      - name: Activate release (migrate, restart, health check)
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            'bash -s' < deploy/remote-release.sh
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

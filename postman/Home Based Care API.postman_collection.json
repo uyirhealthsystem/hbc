@@ -1,0 +1,3010 @@
+{
+  "info": {
+    "_postman_id": "6f1c2b0e-4a7d-4c55-9a51-7b3f0d2e8a11",
+    "name": "Home Based Care API",
+    "description": "Home Based Care (HBC) service, NURSE / PHYSIO / CARETAKER bookings.\n\nIdentity: users, login and tokens live in the separate auth service. The API gateway validates the\nBearer token and forwards X-User-Id + X-Role. HBC trusts those headers for every role check, so these\nrequests send them directly, the same way the gateway does. The first request generates fresh user ids\nfor the run (patient, provider, rival); super admins live in a separate service, so adminId can be any UUID.\nSet gatewaySecret (environment) to the server's GATEWAY_SHARED_SECRET; every request sends it as X-Gateway-Secret.\n\nRoles: SUPER_ADMIN, PATIENT and HBC (every care provider). A provider picks their care type\n(NURSE, PHYSIO or CARETAKER) when registering their profile; it is fixed after that.\nHBC stores only service-provider profiles. Patient contact details are sent with each booking.\nThere is no admin verification: providers can pick bookings as soon as they register.\nMatching: same care type, and the booking is in the provider's pincode or within SERVICE_RADIUS_KM\n(default 10 km) of the provider's latitude/longitude.\n\nFolders run top to bottom as one end-to-end flow (collection variables carry ids between steps).\nChange careType to PHYSIO or CARETAKER to register the providers and run the same flow for another care type.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Provider profiles",
+      "description": "Providers (X-Role: HBC) register their profile under their gateway X-User-Id with a care type (NURSE, PHYSIO or CARETAKER), pincode, latitude and longitude. No verification step.",
+      "item": [
+        {
+          "name": "Register provider profile",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Users come from the external auth service; generate this run's ids as the gateway would forward them.",
+                  "pm.collectionVariables.set('runId', String(Date.now()).slice(-8));",
+                  "pm.collectionVariables.set('patientId', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.collectionVariables.set('providerId', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.collectionVariables.set('rivalId', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const res = pm.response.json();",
+                  "pm.test('profile id is the X-User-Id', () => pm.expect(res.id).to.eql(pm.collectionVariables.get('providerId')));",
+                  "pm.test('care type from the profile', () => pm.expect(res.careType).to.eql(pm.variables.get('careType')));",
+                  "pm.test('location saved', () => {",
+                  "  pm.expect(res.pincode).to.eql('600017');",
+                  "  pm.expect(res.latitude).to.be.a('number');",
+                  "  pm.expect(res.longitude).to.be.a('number');",
+                  "});",
+                  "pm.test('no verification step', () => pm.expect(res.isVerified).to.be.undefined);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"careType\": \"{{careType}}\",\n  \"fullName\": \"Provider One\",\n  \"phone\": \"+91{{runId}}02\",\n  \"pincode\": \"600017\",\n  \"latitude\": 13.0418,\n  \"longitude\": 80.2341,\n  \"licenseNo\": \"LIC-{{runId}}-1\",\n  \"experienceYears\": 3,\n  \"city\": \"Chennai\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            },
+            "description": "The pre-request script starts a run: fresh gateway user ids for the patient, provider and rival."
+          },
+          "response": []
+        },
+        {
+          "name": "Register rival provider profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{rivalId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"careType\": \"{{careType}}\",\n  \"fullName\": \"Provider Two\",\n  \"phone\": \"+91{{runId}}03\",\n  \"pincode\": \"600017\",\n  \"latitude\": 13.0418,\n  \"longitude\": 80.2341\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            },
+            "description": "Second provider of the same care type, used to prove only one provider wins the accept race."
+          },
+          "response": []
+        },
+        {
+          "name": "Register again (409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('PROFILE_EXISTS', () => pm.expect(pm.response.json().error.code).to.eql('PROFILE_EXISTS'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"careType\": \"{{careType}}\",\n  \"fullName\": \"Provider One\",\n  \"phone\": \"+91{{runId}}02\",\n  \"pincode\": \"600017\",\n  \"latitude\": 13.0418,\n  \"longitude\": 80.2341\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get my profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update my profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('updated', () => pm.expect(pm.response.json().experienceYears).to.eql(4));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"experienceYears\": 4\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Change care type (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"careType\": \"CARETAKER\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            },
+            "description": "The care type is fixed at registration."
+          },
+          "response": []
+        },
+        {
+          "name": "Register without location (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{$guid}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"careType\": \"{{careType}}\",\n  \"fullName\": \"No Location\",\n  \"phone\": \"+91{{runId}}08\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            },
+            "description": "pincode, latitude and longitude are required."
+          },
+          "response": []
+        },
+        {
+          "name": "Update latitude without longitude (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"latitude\": 13.05\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            },
+            "description": "Coordinates move together."
+          },
+          "response": []
+        },
+        {
+          "name": "Pool right after registering",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/pool",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "pool"
+              ]
+            },
+            "description": "No admin verification: a registered provider can see the pool immediately."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Super Admin",
+      "description": "Called by the separate super-admin service through the gateway with X-Role: SUPER_ADMIN.",
+      "item": [
+        {
+          "name": "Create catalog service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const res = pm.response.json();",
+                  "pm.test('service is active', () => pm.expect(res.isActive).to.eql(true));",
+                  "pm.collectionVariables.set('serviceId', res.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{adminId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "SUPER_ADMIN",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"careType\": \"{{careType}}\",\n  \"name\": \"{{careType}} home visit {{runId}}\",\n  \"description\": \"Home visit\",\n  \"price\": 750,\n  \"durationMinutes\": 60\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/catalog/services",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "catalog",
+                "services"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List catalog services (all)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{adminId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "SUPER_ADMIN",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/catalog/services?careType={{careType}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "catalog",
+                "services"
+              ],
+              "query": [
+                {
+                  "key": "careType",
+                  "value": "{{careType}}"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update catalog service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{adminId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "SUPER_ADMIN",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"description\": \"Home visit by a qualified professional\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/catalog/services/{{serviceId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "catalog",
+                "services",
+                "{{serviceId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List providers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('registered provider listed', () =>",
+                  "  pm.expect(pm.response.json().map((p) => p.id)).to.include(pm.collectionVariables.get('providerId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{adminId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "SUPER_ADMIN",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/providers?careType={{careType}}&pincode=600017",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "providers"
+              ],
+              "query": [
+                {
+                  "key": "careType",
+                  "value": "{{careType}}"
+                },
+                {
+                  "key": "pincode",
+                  "value": "600017"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Catalog",
+      "description": "Public. No identity headers needed.",
+      "item": [
+        {
+          "name": "List active services",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('new service is listed', () =>",
+                  "  pm.expect(pm.response.json().map((s) => s.id)).to.include(pm.collectionVariables.get('serviceId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/catalog/services?careType={{careType}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "catalog",
+                "services"
+              ],
+              "query": [
+                {
+                  "key": "careType",
+                  "value": "{{careType}}"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. Booking flow",
+      "description": "PENDING → ACCEPTED → CONFIRMED → PAID → IN_PROGRESS → COMPLETED. Each request sends the acting role.",
+      "item": [
+        {
+          "name": "Patient - create booking",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('scheduledAt', new Date(Date.now() + 86400000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "const res = pm.response.json();",
+                  "pm.test('status PENDING', () => pm.expect(res.status).to.eql('PENDING'));",
+                  "pm.collectionVariables.set('bookingId', res.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceId\": \"{{serviceId}}\",\n  \"scheduledAt\": \"{{scheduledAt}}\",\n  \"patientName\": \"Test Patient\",\n  \"patientPhone\": \"+91{{runId}}01\",\n  \"address\": \"12 Gandhi Street, T Nagar\",\n  \"city\": \"Chennai\",\n  \"pincode\": \"600017\",\n  \"latitude\": 13.0418,\n  \"longitude\": 80.2341,\n  \"notes\": \"Ring the bell twice\",\n  \"prescriptions\": [\n    {\n      \"medicineName\": \"Paracetamol\",\n      \"dosage\": \"500mg\",\n      \"frequency\": \"TID\",\n      \"duration\": \"5 days\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patient - list bookings",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "PENDING",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - view pool",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const pooled = pm.response.json().find((b) => b.id === pm.collectionVariables.get('bookingId'));",
+                  "pm.test('booking is in the pool', () => pm.expect(pooled).to.be.an('object'));",
+                  "pm.test('pool hides patient contact and exact location', () => {",
+                  "  pm.expect(pooled.patient).to.be.undefined;",
+                  "  pm.expect(pooled.address).to.be.undefined;",
+                  "  pm.expect(pooled.latitude).to.be.undefined;",
+                  "});",
+                  "pm.test('distance shown (same spot, ~0 km)', () => pm.expect(pooled.distanceKm).to.be.below(0.01));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/pool",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "pool"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - accept booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const res = pm.response.json();",
+                  "pm.test('status ACCEPTED', () => pm.expect(res.status).to.eql('ACCEPTED'));",
+                  "pm.test('patient contact revealed', () => pm.expect(res.patient.phone).to.eql(pm.variables.replaceIn('+91{{runId}}01')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{bookingId}}/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "{{bookingId}}",
+                "accept"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Rival - accept same booking (409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));",
+                  "pm.test('BOOKING_UNAVAILABLE', () => pm.expect(pm.response.json().error.code).to.eql('BOOKING_UNAVAILABLE'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{rivalId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{bookingId}}/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "{{bookingId}}",
+                "accept"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - confirm booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status CONFIRMED', () => pm.expect(pm.response.json().status).to.eql('CONFIRMED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Spoke to patient\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{bookingId}}/confirm",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "{{bookingId}}",
+                "confirm"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patient - pay",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const res = pm.response.json();",
+                  "pm.test('payment-service payment created', () => pm.expect(res.payment.id).to.match(/^[0-9a-f-]{36}$/));",
+                  "pm.test('amount comes from the booking', () => pm.expect(res.payment.amount).to.eql(res.booking.amount));",
+                  "// Needs payment-service running with the `local` profile (mock provider, auto-pay): the payment is PAID at once.",
+                  "// With a real provider the response is PENDING + checkoutUrl and the booking turns PAID on payment-service's callback.",
+                  "pm.test('status PAID (payment-service local/mock)', () => pm.expect(res.booking.status).to.eql('PAID'));",
+                  "pm.test('visit OTP issued to patient', () => pm.expect(res.booking.visitOtp).to.match(/^[0-9]{6}$/));",
+                  "pm.collectionVariables.set('visitOtp', res.booking.visitOtp);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings/{{bookingId}}/pay",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings",
+                "{{bookingId}}",
+                "pay"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - get booking (no OTP)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('provider never sees the OTP', () => pm.expect(pm.response.json().visitOtp).to.be.undefined);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{bookingId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "{{bookingId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - start with OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status IN_PROGRESS', () => pm.expect(pm.response.json().status).to.eql('IN_PROGRESS'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"otp\": \"{{visitOtp}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{bookingId}}/start",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "{{bookingId}}",
+                "start"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - complete",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status COMPLETED', () => pm.expect(pm.response.json().status).to.eql('COMPLETED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"All good\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{bookingId}}/complete",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "{{bookingId}}",
+                "complete"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patient - get booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const res = pm.response.json();",
+                  "pm.test('assigned provider shown', () => pm.expect(res.provider.id).to.eql(pm.collectionVariables.get('providerId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings/{{bookingId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings",
+                "{{bookingId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - my bookings",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings?status=COMPLETED",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "COMPLETED"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Location matching",
+      "description": "Providers work from T Nagar (600017). Adyar is ~5 km away in another pincode (matched by distance); Coimbatore is ~430 km away (not matched).",
+      "item": [
+        {
+          "name": "Patient - nearby booking (other pincode)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('scheduledAt', new Date(Date.now() + 86400000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('nearbyId', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceId\": \"{{serviceId}}\",\n  \"scheduledAt\": \"{{scheduledAt}}\",\n  \"patientName\": \"Test Patient\",\n  \"patientPhone\": \"+91{{runId}}01\",\n  \"address\": \"4 Lattice Bridge Road, Adyar\",\n  \"city\": \"Chennai\",\n  \"pincode\": \"600020\",\n  \"latitude\": 13.0012,\n  \"longitude\": 80.2565\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patient - far booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('farId', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceId\": \"{{serviceId}}\",\n  \"scheduledAt\": \"{{scheduledAt}}\",\n  \"patientName\": \"Test Patient\",\n  \"patientPhone\": \"+91{{runId}}01\",\n  \"address\": \"1 Avinashi Road\",\n  \"city\": \"Coimbatore\",\n  \"pincode\": \"641001\",\n  \"latitude\": 11.0168,\n  \"longitude\": 76.9558\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - pool matches by location",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "const pool = pm.response.json();",
+                  "const nearby = pool.find((b) => b.id === pm.collectionVariables.get('nearbyId'));",
+                  "pm.test('nearby booking in another pincode is matched by distance', () => pm.expect(nearby).to.be.an('object'));",
+                  "pm.test('distance T Nagar to Adyar is about 5 km', () => pm.expect(nearby.distanceKm).to.be.within(3, 8));",
+                  "pm.test('far booking is not matched', () =>",
+                  "  pm.expect(pool.map((b) => b.id)).to.not.include(pm.collectionVariables.get('farId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/pool",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "pool"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - accept far booking (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{farId}}/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "{{farId}}",
+                "accept"
+              ]
+            },
+            "description": "Accept uses the same matching rule as the pool."
+          },
+          "response": []
+        },
+        {
+          "name": "Patient - cancel nearby booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"location test\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings/{{nearbyId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings",
+                "{{nearbyId}}",
+                "cancel"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patient - cancel far booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"location test\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings/{{farId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings",
+                "{{farId}}",
+                "cancel"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "6. Release and cancel",
+      "item": [
+        {
+          "name": "Patient - create second booking",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('scheduledAt', new Date(Date.now() + 2 * 86400000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('booking2Id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceId\": \"{{serviceId}}\",\n  \"scheduledAt\": \"{{scheduledAt}}\",\n  \"patientName\": \"Test Patient\",\n  \"patientPhone\": \"+91{{runId}}01\",\n  \"address\": \"12 Gandhi Street, T Nagar\",\n  \"city\": \"Chennai\",\n  \"pincode\": \"600017\",\n  \"latitude\": 13.0418,\n  \"longitude\": 80.2341\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - accept",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{booking2Id}}/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "{{booking2Id}}",
+                "accept"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider - release to pool",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('back to PENDING', () => pm.expect(pm.response.json().status).to.eql('PENDING'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Patient unreachable\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/{{booking2Id}}/release",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "{{booking2Id}}",
+                "release"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patient - cancel",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status CANCELLED', () => pm.expect(pm.response.json().status).to.eql('CANCELLED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Plans changed\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings/{{booking2Id}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings",
+                "{{booking2Id}}",
+                "cancel"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Admin - list all bookings",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{adminId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "SUPER_ADMIN",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/bookings?careType={{careType}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "bookings"
+              ],
+              "query": [
+                {
+                  "key": "careType",
+                  "value": "{{careType}}"
+                },
+                {
+                  "key": "status",
+                  "value": "COMPLETED",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Admin - deactivate catalog service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{adminId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "SUPER_ADMIN",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/catalog/services/{{serviceId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "catalog",
+                "services",
+                "{{serviceId}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "7. Gateway header checks",
+      "description": "Negative cases for the X-User-Id / X-Role trust boundary.",
+      "item": [
+        {
+          "name": "No identity headers (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "bookings"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "X-User-Id not a UUID (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "not-a-uuid",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "SUPER_ADMIN",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "bookings"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Unknown X-Role (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{adminId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "ROOT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "bookings"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patient calling admin route (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/admin/catalog/services",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "admin",
+                "catalog",
+                "services"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Provider calling patient route (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "HBC",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patient calling provider pool (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/bookings/pool",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "bookings",
+                "pool"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Care type sent as X-Role (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{providerId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "NURSE",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            },
+            "description": "Providers must come through as X-Role HBC; NURSE / PHYSIO / CARETAKER are not roles."
+          },
+          "response": []
+        },
+        {
+          "name": "Patient registering provider profile (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"careType\": \"NURSE\",\n  \"fullName\": \"Not A Provider\",\n  \"phone\": \"+91{{runId}}09\",\n  \"pincode\": \"600017\",\n  \"latitude\": 13.0418,\n  \"longitude\": 80.2341\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/provider/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "provider",
+                "profile"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Booking without patient contact (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-User-Id",
+                "value": "{{patientId}}",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Role",
+                "value": "PATIENT",
+                "type": "text",
+                "description": "Set by the gateway after validating the access token"
+              },
+              {
+                "key": "X-Gateway-Secret",
+                "value": "{{gatewaySecret}}",
+                "type": "text",
+                "description": "Must match GATEWAY_SHARED_SECRET on the server; ignored when that is not set"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceId\": \"{{serviceId}}\",\n  \"scheduledAt\": \"{{scheduledAt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/hbc/patient/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "hbc",
+                "patient",
+                "bookings"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:4000",
+      "type": "string",
+      "description": "Host only, e.g. http://localhost:4000 or the gateway URL. Paths carry /api/v1/hbc."
+    },
+    {
+      "key": "careType",
+      "value": "NURSE",
+      "type": "string",
+      "description": "NURSE, PHYSIO or CARETAKER"
+    },
+    {
+      "key": "adminId",
+      "value": "00000000-0000-4000-8000-000000000001",
+      "type": "string",
+      "description": "Super admin id from the separate super-admin service"
+    },
+    {
+      "key": "gatewaySecret",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "runId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "patientId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "providerId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "rivalId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "serviceId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "bookingId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "visitOtp",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "booking2Id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "nearbyId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "farId",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+[Unit]
+Description=Uyir Home Based Care (HBC) service
+After=network.target
+
+[Service]
+Type=simple
+User=hbc
+WorkingDirectory=/opt/hbc/current
+EnvironmentFile=/opt/hbc/shared/hbc.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/server.js
+Restart=on-failure
+RestartSec=3
+# src/server.ts closes the HTTP server and the DB pool on SIGTERM
+TimeoutStopSec=30
+# hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/hbc
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
